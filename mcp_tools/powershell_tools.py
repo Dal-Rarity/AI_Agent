@@ -102,6 +102,7 @@ def run_powershell_command(command: str, capture_output: bool = True, timeout: i
        执行策略报错 CLIXML 污染 stderr）。
     ⭐ stdin 必须 DEVNULL：MCP stdio 的 stdin 是 JSON-RPC 管道。子进程若继承
        stdin，npm create / npx 会把管道当成交互输入一直等 'y'，Agent 表现为卡死。
+    ⭐ 执行完弹出可见窗口显示命令和结果，方便用户观察交互效果。
     """
     try:
         command = _ensure_npm_noninteractive(command)
@@ -142,9 +143,44 @@ def run_powershell_command(command: str, capture_output: bool = True, timeout: i
                 ),
                 1,
             )
-        return (stdout or "").strip(), (stderr or "").strip(), proc.returncode
+
+        stdout = (stdout or "").strip()
+        stderr = (stderr or "").strip()
+        rc = proc.returncode
+
+        # ⭐ 弹出可见窗口显示命令和结果（方便用户观察交互效果）
+        _show_command_result(command, stdout, stderr, rc)
+
+        return stdout, stderr, rc
     except Exception as e:
         return "", str(e), 1
+
+
+def _show_command_result(command: str, stdout: str, stderr: str, rc: int) -> None:
+    """弹出一个 cmd 窗口显示执行的命令和结果，窗口停留直到用户按键关闭。"""
+    try:
+        # 把命令和结果写到临时批处理，由 cmd /k 执行并保持窗口
+        result_text = f"命令: {command}\n\n退出码: {rc}\n"
+        if stdout:
+            result_text += f"\n--- 输出 ---\n{stdout}\n"
+        if stderr:
+            result_text += f"\n--- 错误 ---\n{stderr}\n"
+        # 转义双引号和特殊字符，写入临时 .txt 供 type 显示
+        import tempfile
+        tmp = Path(tempfile.gettempdir()) / f"ps_result_{int(time.time()*1000)}.txt"
+        tmp.write_text(result_text, encoding="utf-8")
+        # 用 cmd /c type 文件 && pause 弹出窗口显示，pause 保证窗口不自动关闭
+        # ⭐ stdin/stdout/stderr 全部 DEVNULL：弹窗不能继承 MCP 的 stdio 管道，
+        #    否则会报 0x800700e8（管道被关闭）导致窗口打不开
+        subprocess.Popen(
+            ["cmd", "/c", f'type "{tmp}" & echo. & pause'],
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass  # 弹窗失败不影响主流程
 
 
 def get_powershell_processes():

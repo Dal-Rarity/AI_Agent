@@ -82,10 +82,11 @@ from prompts.unified_prompts import (
 
 # ==================== 调试输出（极简模式：一行一条，核心信息优先） ====================
 
-# 输出截断长度：防止单条消息刷屏，只保留最关键的信息
-MAX_THINK_CHARS = 80        # AI 思考内容最多显示字符数
-MAX_ARGS_CHARS = 60         # 工具参数最多显示字符数
-MAX_RESULT_CHARS = 100      # 工具结果最多显示字符数
+# 中间过程输出长度：只显示摘要，保持 Terminal 简洁
+# 最终汇报（_print_final_summary）不受此限制，完整输出
+MAX_THINK_CHARS = 100       # AI 思考内容摘要长度
+MAX_ARGS_CHARS = 80         # 工具参数摘要长度
+MAX_RESULT_CHARS = 100      # 工具结果摘要长度
 
 
 def _truncate(text: str, max_len: int) -> str:
@@ -142,12 +143,12 @@ def _parse_final_report(text: str) -> dict:
         status = raw_status[:10]  # 未知状态，原样显示
 
     def _extract_items(s: str) -> list:
-        """提取列表项（- 开头的行），每行截断到 60 字符。"""
+        """提取列表项（- 开头的行），完整保留。"""
         items = []
         for line in s.split("\n"):
             line = line.strip().lstrip("-•·").strip()
             if line:
-                items.append(_truncate(line, 60))
+                items.append(line)
         return items
 
     return {
@@ -189,7 +190,7 @@ def _print_final_summary(report: dict, steps: int, elapsed: float) -> None:
 # qwen3 兼容模式报错上限：openai.BadRequestError: Range of input length should be [1, 983616]
 # 死循环时多轮 handoff pair + 工具结果累积会触顶；这里给 supervisor / 专家各保留 80k
 # token 的输入预算，远低于上限又足够保留最近若干轮对话。
-MAX_CONTEXT_TOKENS = 80000
+MAX_CONTEXT_TOKENS = 40000
 
 # 单条消息字符硬上限：trim_messages 只能整条丢弃消息、不能拆分单条消息，
 # 实测一次目录树读取/页面抓取/长命令输出可返回约 30 万字符，单条即可击穿
@@ -336,7 +337,7 @@ def _artifact_preview(name: str, args: dict) -> str:
             return str(args[key])
     for key in ("command", "sql"):
         if args.get(key):
-            return _truncate(str(args[key]), 50)
+            return _truncate(str(args[key]), 200)
     return name
 
 
@@ -764,7 +765,7 @@ async def _stream_with_heartbeat(stream, start_time, interval: int = 15):
 # 每轮结束后持久化保留的最近消息条数：
 # 既保留近期对话上下文（下轮能接续），又防止旧失败循环/超长历史在 checkpoint 里
 # 越积越多——这就是"固定 thread_id 跑几轮后要么撑爆要么被旧记录带偏"的根因。
-MAX_KEEP_MESSAGES = 30
+MAX_KEEP_MESSAGES = 15
 
 # 单轮用户输入的最大协作步数（根图层）：
 # 防止 supervisor 在多专家间来回派遣导致总轮次爆炸（实测可达 60+ 轮 / 5+ 小时）。
@@ -939,11 +940,16 @@ async def run_agent(thread_id: str = "4"):
                                 last_supervisor_text = msg.content
                         else:
                             for tool in msg.tool_calls:
-                                args_str = _truncate(
-                                    str(tool.get("args", {})), MAX_ARGS_CHARS
-                                )
-                                print(f"  🔧 {node_name} → {tool['name']}({args_str})")
-                                actions_log.append((node_name, f"调用 {tool['name']}"))
+                                tool_name = tool['name']
+                                # 只取第一个参数值作为摘要，不打印全部参数
+                                args = tool.get("args", {})
+                                arg_preview = ""
+                                if isinstance(args, dict) and args:
+                                    first_key = next(iter(args))
+                                    first_val = str(args[first_key])[:30]
+                                    arg_preview = f"({first_key}={first_val})"
+                                print(f"  🔧 {node_name} → {tool_name}{arg_preview}")
+                                actions_log.append((node_name, f"调用 {tool_name}"))
                     elif isinstance(msg, ToolMessage):
                         # 工具消息：只打印工具名 + 简短结果 + 耗时
                         tool_name = getattr(msg, "name", "unknown")
@@ -977,7 +983,7 @@ async def run_agent(thread_id: str = "4"):
                     for expert, action in actions_log[-10:]:
                         print(f"   • [{expert}] {action}")
                 if last_supervisor_text:
-                    print(f"\n💬 主管原话：{_truncate(last_supervisor_text, 200)}")
+                    print(f"\n💬 主管原话：{last_supervisor_text}")
                 print("\n" + "=" * 60 + "\n")
         except GraphRecursionError:
             print(f"\n⚠️ 本轮被强制终止（{iteration_count} 步，递归上限）")

@@ -63,7 +63,7 @@ def parse_args():
     )
     parser.add_argument(
         "--thread-id",
-        default="3",
+        default="4",
         help="会话线程 ID，相同 ID 可恢复历史对话上下文（默认：4，仅 unified 模式生效）",
     )
     return parser.parse_args()
