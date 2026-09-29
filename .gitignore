@@ -1,0 +1,41 @@
+# ===== 密钥（绝不提交）=====
+.env
+.env.*
+!.env.example
+
+# ===== Python 运行时产物 =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+
+# ===== 运行时状态与临时文件 =====
+.temp/
+temp/
+tmp/
+*.log
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.iml
+*.suo
+
+# ===== 自动备份目录（内容与源码重复，且历史版本可能含旧 .env 副本）=====
+backups/
+
+# ===== 前端项目（不属于本 agent 代码，单独管理）=====
+.code/
+
+# ===== OS =====
+Thumbs.db
+Desktop.ini
+.DS_Store
