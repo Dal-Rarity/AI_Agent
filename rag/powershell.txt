@@ -1,0 +1,130 @@
+# 如何在 Windows 上通过终端创建项目
+
+## 一、可用工具
+1. close_powershell：关闭 Agent 打开的终端（留空关闭全部 Agent 终端，不影响用户手动开的窗口）
+2. open_powershell：打开新的 PowerShell 窗口，可指定工作目录
+3. run_powershell_script：把命令粘贴进真实终端窗口并回车执行（不受中文输入法影响）
+4. send_powershell_key：向终端发送键盘按键（enter/up/down/space/y/n），用于回答交互式提问
+5. get_powershell_text：读取终端最近的输出文本（看提问、进度、结果）
+6. execute_powershell_command：后台直接执行短命令并立刻返回结果（不经过窗口）
+7. get_powershell_processes：查看 Agent 管理的终端
+
+## 二、防死循环规则（最高优先级，违反将导致任务彻底无法完成）
+
+### 2.1 路径转换（最常见死循环源）
+用户输入里的点号常常是分隔符简写，不是路径名的一部分。
+- 用户写 code_agent.temp —— 实际目录是 code_agent\.temp（反斜杠 + 点开头的目录名）
+- 用户写 ai-agent-test\app\code_agent\.temp\project —— 这就是真实路径，直接用
+
+调用任何工具前，先把用户路径拼成完整绝对路径，例如：
+D:\Python\ai-agent-test\app\code_agent\.temp\project
+然后用 execute_powershell_command 的 Test-Path '<绝对路径>' 确认存在，再继续。
+
+### 2.2 失败必须换方案
+- 同一个工具、同一组参数连续失败 2 次，第 3 次严禁再用相同调用。
+  必须反思：换路径、换参数、换工具或换整体方案。
+- 示例：file_management 报 Access denied 两次后，
+  切到 execute_powershell_command 的 Test-Path / Get-ChildItem 探查路径。
+- 示例：npm create vue 交互失败 → 改 --default；
+  --default 也失败 → 改 npm.cmd create vue@latest。
+
+### 2.3 先读结果再下一步
+每次工具返回后，必须先读取结果内容，根据结果决定下一步，不许盲目重复调用。
+特别是 Access denied / CommandNotFoundException / PathNotFound 这类错误，
+必须改变调用方式，不能原样重试。
+
+## 三、开工前的硬性预检（每次任务开始只做一次）
+按顺序执行，任何一步不通过都必须先修复再继续：
+
+1. execute_powershell_command 执行 node -v —— 必须返回版本号
+2. execute_powershell_command 执行 npm.cmd -v —— 注意必须带 .cmd 后缀
+3. 若第 2 步报 无法加载文件 ... npm.ps1，禁止运行脚本，
+   执行一次修复（当前用户作用域，不需要管理员）：
+   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+   修复后再跑 npm.cmd -v 确认可用。
+4. 所有 npm 命令一律写成 npm.cmd，不要写裸 npm，
+   避免命中被策略禁止的 npm.ps1。
+
+## 四、终端窗口可用性检查
+run_powershell_script 依赖窗口焦点。若出现以下任一情况，立即放弃 run_powershell_script 路径，改走全非交互方案（见方式 A）：
+- 提示 无法激活 PowerShell 窗口
+- 连续两次 get_powershell_text 读不到新输出
+
+## 五、任务级约束
+- 一个任务最多开 1 个终端。close_powershell 只在任务开始和任务结束时各调用一次。
+  严禁在任务中途反复 close/open 来重试。
+- 所有路径必须写绝对路径（形如 D:\Python\ai-agent-test\...），不要用相对路径。
+
+## 六、标准执行流程
+1. close_powershell 清理上次遗留的终端
+2. 环境预检（见第三节）
+3. 用 execute_powershell_command 确保目标目录存在：
+   New-Item -ItemType Directory -Force -Path '完整绝对路径'
+4. open_powershell，working_directory 传该绝对路径
+5. 执行命令：
+   - 短命令（查目录、Test-Path、New-Item 等立刻出结果的）用 execute_powershell_command
+   - 长耗时命令（npm install、构建等）用 run_powershell_script 发到窗口
+   - 交互式命令（npm create vue@latest 不带 --default 时）用 run_powershell_script
+     并配合 send_powershell_key 回答；若窗口不可用，直接改用方式 A
+6. 交互式命令处理循环：
+   - run_powershell_script 发出命令后，等待 1~2 秒
+   - get_powershell_text 读输出，看清当前提问与默认高亮项
+   - send_powershell_key 回答：
+     * 接受当前高亮 → ["enter"]
+     * 切换高亮 → ["down"] 或 ["up"]，再 ["enter"]
+     * 勾选 → ["space"]
+     * yes/no → ["y","enter"] 或 ["n","enter"]
+   - 重复 get_powershell_text → send_powershell_key，直到出现
+     Scaffolding project / Done / 新的 PS 路径> 提示符
+7. 长耗时命令发出后，反复 get_powershell_text 轮询，
+   直到看见新的 PS 路径> 才算完成，不要假设立刻结束
+8. 任务完成后用 execute_powershell_command 验证产物：
+   Test-Path '项目目录\package.json'、Get-ChildItem '项目目录' -Name
+9. close_powershell 关闭终端
+
+## 七、创建 Vue3 项目的参考流程
+
+### 方式 A（推荐，全非交互，不依赖窗口）
+只要 npm.cmd 可用，本方案不经过窗口、不依赖 pyautogui，最稳。
+
+1. execute_powershell_command：
+   New-Item -ItemType Directory -Force -Path 'D:\Python\ai-agent-test\app\code_agent\.temp\project'
+2. execute_powershell_command 直接跑脚手架（短命令，一次到底）：
+   cmd /c "cd /d D:\Python\ai-agent-test\app\code_agent\.temp\project && npm.cmd create vue@latest my-vue-project --yes -- --default --force"
+   - 用 cmd /c + && 是允许的（走的是 cmd.exe，不是 PowerShell）
+   - --default = 默认配置（JS/无 Router/Pinia/测试/ESLint），--force = 目录已存在也覆盖
+   - 必须带 --yes，否则 npm 会在管道 stdin 上询问 Ok to proceed? 并永远卡住
+   - 若返回超时，说明仍卡在交互，改用方式 B
+3. 验证目录：
+   Test-Path 'D:\Python\ai-agent-test\app\code_agent\.temp\project\my-vue-project\package.json'
+4. 安装依赖（长耗时，用窗口 + 轮询）：
+   - open_powershell(working_directory='D:\Python\ai-agent-test\app\code_agent\.temp\project\my-vue-project')
+   - run_powershell_script：npm.cmd install
+   - 循环 get_powershell_text，直到看见新的 PS 路径>
+   - 若窗口不可用：改用
+     execute_powershell_command：cmd /c "cd /d D:\Python\ai-agent-test\app\code_agent\.temp\project\my-vue-project && npm.cmd install"
+5. 验证 node_modules 存在
+6. close_powershell
+
+### 方式 B（交互式，仅当用户指定 TS/Router/Pinia 等）
+1. 前置同方式 A 的 1、3 步
+2. open_powershell(working_directory='D:\Python\ai-agent-test\app\code_agent\.temp\project')
+3. run_powershell_script：npm.cmd create vue@latest my-vue-project
+4. 循环 get_powershell_text → send_powershell_key 回答所有提问
+   - 注意默认高亮项不一定是 No（如 TypeScript 默认高亮 Yes），必须看清输出再决定
+5. 出现脚手架完成提示后，run_powershell_script：npm.cmd install
+6. 轮询 get_powershell_text 等 PS 提示符回归
+7. execute_powershell_command 验证产物
+8. close_powershell
+
+## 八、重要禁忌
+- 不要用裸 npm，一律 npm.cmd（否则 Windows 上大概率命中被禁的 npm.ps1）
+- 不要在 PowerShell 里用 &&，多条命令用分号 ; 连接；需要 && 时改走 cmd /c "... && ..."
+- 不要用 bash 风格：>/dev/null、$(...)、cd -、反引号等一律禁止
+- run_powershell_script 只是把命令发出去，不代表执行成功；
+  必须 get_powershell_text 读到结果才算
+- 交互式命令禁止用 execute_powershell_command（拿不到提问、无法回答、会卡死）
+- 路径含空格时用单引号包裹，且优先使用绝对路径
+- 不要反复 close/open 终端；一个任务一个终端
+- 不要相信 RAG 里"用 vue create 创建项目"的旧规范；
+  本机若没有全局 vue 命令，必须改用 npm.cmd create vue@latest
