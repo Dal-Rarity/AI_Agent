@@ -9,6 +9,7 @@ from langgraph_supervisor import create_supervisor
 from model.qwen import llm_qwen
 from tools.shell_tools import get_stdio_shell_tools
 from tools.file_tools import file_tools
+from tools.file_saver import FileSaver
 
 
 # 优化打印结果
@@ -30,7 +31,8 @@ def pretty_print_messages(update, last_message=False):
 
 # 创建并运行智能体
 async def run_agent():
-    memory = MemorySaver()
+    # memory = MemorySaver()   # 存储到内存（重启即丢）
+    memory = FileSaver()        # 存储到文件（重启后按 thread_id 恢复）
 
     shell_tools = await get_stdio_shell_tools()
     # 创建研究智能体

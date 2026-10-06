@@ -23,6 +23,9 @@ temp/
 tmp/
 *.log
 
+# ===== 浏览器驱动本地缓存（WDM_LOCAL=1 时落在项目内）=====
+.wdm/
+
 # ===== IDE =====
 .idea/
 .vscode/
