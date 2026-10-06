@@ -176,7 +176,7 @@ AI_Agent/
 > 项目的已知薄弱点即下一阶段规划。每条均给出"现状 → 方案"，按可部署性优先级排序。
 
 1. **配置中心化** — 现状：VM 地址（`192.168.56.200`）、RAG `workspace_id/index_id`、FileSaver 基路径硬编码。规划：全部收口到环境变量 / `config.toml`，MySQL 密码已先行示范。
-2. **MCP 加载容错与降级** — 现状：`asyncio.gather` 一个子进程失败则整个启动失败。规划：`return_exceptions=True` + 按专家分组加载，某专家工具不可用时其余专家照常服务。
+2. **MCP 加载容错与降级** — 现状：`asyncio.gather` 一个子进程失败则整个启动失败。规划：`return_exceptions=True` 捕获单个子进程异常 + 按专家分组加载；对加载失败的专家打上"能力不可用"标记，其工具从路由表中摘除，其余专家照常服务，Supervisor prompt 动态告知当前可用能力，避免派活给已下线的专家。
 3. **结构化错误协议** — 现状：工具返回字符串错误，LLM 靠文本理解。规划：统一 `{code, message, suggestion}` JSON，兼顾模型可读性与上层可校验性。
 4. **生产级 Checkpointer** — 现状：FileSaver 的 `put_writes` 为空实现，不支持 pending writes 恢复。规划：多用户/生产场景切换 SqliteSaver（单机）或 RedisSaver（分布式），FileSaver 保留为开发调试态。
 5. **浏览器驱动惰性初始化** — 现状：`EdgeChromiumDriverManager` 在 import 阶段联网，断网拖垮子进程（当前靠 `.wdm` 缓存）。规划：首次调用时解析 + `EDGE_DRIVER_PATH` 环境变量指定本地驱动。
