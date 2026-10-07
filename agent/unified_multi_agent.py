@@ -306,11 +306,18 @@ def _duplicate_tool_call_count(messages) -> int:
 
 
 def _is_tool_error(content) -> bool:
-    """识别失败的工具结果：MCP 错误、终端命令失败、无效工具名等。"""
+    """识别失败的工具结果：MCP 错误、终端命令失败、无效工具名等。
+
+    必须用包含式匹配：mysql_tools 的真实错误文本为"数据库查询错误："/
+    "数据库连接错误："/"数据库中的表查询错误："等，均不以"错误"开头
+    （回归场景 26/33 实证：只看开头会让 L1b 连续错误闸失效）。
+    """
     text = str(content).strip()
     return (
         text.startswith("Error")
         or text.startswith("错误")
+        or "错误：" in text[:200]
+        or "错误:" in text[:200]
         or "执行失败" in text[:60]
         or "is not a valid tool" in text[:100]
     )
@@ -522,60 +529,96 @@ def _task_text_since_dispatch(messages, start: int) -> str:
 
 @wrap_model_call
 async def no_op_guard(request, handler):
-    """拦截"零工具调用却要交回/报成功"的专家回复。"""
+    """拦截"零任务工具调用却要交回/报成功"的专家回复。
+
+    handoff 工具（transfer_ 前缀，含 transfer_back_to_supervisor）不算任务
+    执行：动作任务未动手时，专家不能靠 handoff 合法退出——回归场景 30
+    实证的绕过路径（首次引导响应未重判 + 下一轮 handoff 被放行）。
+    """
     response = await handler(request)
 
-    # 只处理标准 ModelResponse；ExtendedModelResponse 等形态原样放行
-    result = getattr(response, "result", None)
-    if not result:
-        return response
-
-    ai_messages = [m for m in result if isinstance(m, AIMessage)]
-    if not ai_messages:
-        return response
-    last_ai = ai_messages[-1]
-
-    # 模型发起了工具调用 → 正常执行链，放行
-    if getattr(last_ai, "tool_calls", None):
+    last_ai = _last_ai_of_response(response)
+    if last_ai is None:
+        # 非标准形态（无 AIMessage）原样放行
         return response
 
     messages = request.state.get("messages", [])
     start = _dispatch_start(messages)
 
-    # 本次派遣已真实执行过工具 → 属于"做完后总结"，放行
+    # 本次派遣已真实执行过工具 → "做完/试过之后总结交回"合法
     if _has_tool_execution(messages, start):
         return response
 
     task = _task_text_since_dispatch(messages, start)
 
-    # 任务不含动作性要求（如纯讨论/解释）→ 允许直接文字回复
+    # 非动作性任务（纯讨论/解释）→ 允许直接文字回复
     if not any(verb in task for verb in ACTION_VERBS):
         return response
 
+    # 模型正要调用【任务】工具 → 正常执行链
+    if _task_tool_calls(last_ai):
+        return response
+
+    # 到此：last_ai 无任何工具调用，或只有 handoff 调用——任务实际未执行
     already_guarded = any(
         isinstance(m, SystemMessage)
         and NOOP_GUARD_MARK in str(getattr(m, "content", ""))
         for m in messages[start:]
     )
 
-    if not already_guarded:
-        # 第一次空转：不把假结果向上交，追加纠正消息后再给模型一次真正执行的机会
-        warn = SystemMessage(content=(
-            f"{NOOP_GUARD_MARK}你还没有调用任何工具，任务实际尚未执行。"
-            "请立即选择与任务匹配的【本岗位工具】真正执行一次，再按真实结果汇报；"
-            "只有在确认自己确实没有该能力时，才允许输出 "
-            "[待办] <子任务>: <缺少的能力> 并交回主管。"
-            "禁止不调工具就声称完成，也禁止只说'交回主管'。"
-        ))
-        guided_state = {
-            **request.state,
-            "messages": [*messages, last_ai, warn],
-        }
-        return await handler(dataclasses.replace(request, state=guided_state))
+    if already_guarded:
+        # 已纠正过仍不动手（含试图 handoff 退出）→ 二段 [待办]
+        return _noop_todo_message(task)
 
-    # 第二次仍零工具空转：丢弃其原文，统一转成主管不会误判为成功的 [待办] 信号
+    # 第一次空转：注入纠正消息后再给模型一次真正执行的机会
+    warn = SystemMessage(content=(
+        f"{NOOP_GUARD_MARK}你还没有调用任何任务工具，任务实际尚未执行。"
+        "请立即选择与任务匹配的【本岗位工具】真正执行一次，再按真实结果汇报；"
+        "只有在确认自己确实没有该能力时，才允许输出 "
+        "[待办] <子任务>: <缺少的能力> 并交回主管。"
+        "禁止不调工具就声称完成，禁止只说'交回主管'，也禁止调用 transfer_ 类工具直接退出。"
+    ))
+    guided_state = {
+        **request.state,
+        "messages": [*messages, last_ai, warn],
+    }
+    guided_response = await handler(dataclasses.replace(request, state=guided_state))
+
+    # 引导响应必须重新判定：模型真的动手了才放行；
+    # 仍空转/只发 handoff → 直接二段 [待办]，不让其进入下一轮图循环
+    guided_ai = _last_ai_of_response(guided_response)
+    if guided_ai is not None and _task_tool_calls(guided_ai):
+        return guided_response
+    return _noop_todo_message(task)
+
+
+# handoff 工具前缀：transfer_to_<专家> / transfer_back_to_supervisor。
+# 按 EXPERT_HANDOFF_RULE 这些工具本不属于专家，但模型幻觉调用时框架仍会执行，
+# 守卫必须将其与真正的任务工具区分。
+HANDOFF_TOOL_PREFIX = "transfer_"
+
+
+def _last_ai_of_response(response):
+    """从模型中间件响应中取最后一条 AIMessage；非标准形态返回 None。"""
+    result = getattr(response, "result", None)
+    if not result:
+        return None
+    ai_messages = [m for m in result if isinstance(m, AIMessage)]
+    return ai_messages[-1] if ai_messages else None
+
+
+def _task_tool_calls(ai_message) -> list:
+    """返回真正执行任务的工具调用（排除 transfer_ handoff 工具）。"""
+    return [
+        tc for tc in (getattr(ai_message, "tool_calls", None) or [])
+        if not tc.get("name", "").startswith(HANDOFF_TOOL_PREFIX)
+    ]
+
+
+def _noop_todo_message(task: str) -> AIMessage:
+    """空转守卫二段：主管不会误判为成功的 [待办] 信号。"""
     return AIMessage(content=(
-        "[待办] 任务未执行：连续两轮未调用任何工具即试图交回，"
+        "[待办] 任务未执行：连续两轮未调用任何任务工具即试图交回，"
         "本结果不代表成功。\n"
         f"原始任务：{_truncate(task, 120)}\n"
         "请主管改派其他专家、把任务拆小后重新派遣，或人工介入处理。"

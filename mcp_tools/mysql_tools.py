@@ -36,32 +36,32 @@ def get_connection(db=None):
     config = MYSQL_CONFIG.copy()
     if db:
         config['database'] = db
-
+    # 连接失败直接抛出真实异常，并附明确 host:port——
+    # 禁止返回字符串哨兵，否则上层 result,rowcount 解包会掩盖真实原因（回归场景 33）；
+    # pymysql 自带文本只含 host 不含 port，会让模型误判连接端口
     try:
-        connection = pymysql.connect(**config)
-        return connection
+        return pymysql.connect(**config)
     except Exception as e:
-        msg = f"数据库连接错误：" + str(e)
-        return msg
+        target = f"{config['host']}:{config['port']}"
+        if db:
+            target += f"/{db}"
+        raise RuntimeError(f"无法连接 MySQL（目标 {target}）：{e}") from e
 
 def execute_query(command, database=None, params = None, commit = False):
+    connection = get_connection(database)
     try:
-        connection = get_connection(database)
-        if not isinstance(connection, pymysql.Connection):
-            return connection
-        else:
-            with connection.cursor(pymysql.cursors.DictCursor) as cursor:
-                cursor.execute(command, params)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute(command, params)
 
-                # 获取查询结果
-                result = cursor.fetchall()
-                # 遇到需要提交的情况时
-                if commit:
-                    connection.commit()
+            # 获取查询结果
+            result = cursor.fetchall()
+            # 遇到需要提交的情况时
+            if commit:
+                connection.commit()
 
-                return result, cursor.rowcount
-    except Exception as e:
-        raise e
+            return result, cursor.rowcount
+    finally:
+        connection.close()
 
 
 # 查看所连接中的数据库

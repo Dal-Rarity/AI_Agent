@@ -27,6 +27,32 @@ _STATE_DIR.mkdir(parents=True, exist_ok=True)     # 不存在就自动创建
 _STATE_FILE = _STATE_DIR / "powershell.json"
 
 
+# ---------------------------------------------------------------- 配置文件保护
+# 回归场景 33 实证：模型在 MySQL 停库排障时，会自行用命令把 .env/.env.example
+# 的 MYSQL_PORT 改成本机 3306，造成数据源漂移（连到 Windows 本机 MySQL83）。
+# 受保护配置禁止专家通过命令行写入/删除，只能由人工变更。
+_PROTECTED_CONFIG_RE = re.compile(
+    r"(^|[/\\\s\"'`<>\-|])\.env(\.example)?(?=$|[/\\\s\"'`<>\-|.])", re.IGNORECASE
+)
+_WRITE_INTENT_RE = re.compile(
+    r"set-content|add-content|out-file|clear-content|remove-item|"
+    r"\bdel\b|\berase\b|\bren(ame)?\b|rename-item|move-item|copy-item|"
+    r"tee-object|io\.file]::(write|delete|move)|>>?",
+    re.IGNORECASE,
+)
+PROTECTED_CONFIG_MSG = (
+    "🚫 配置文件保护：.env/.env.example 是运行环境配置，禁止专家通过命令行修改或删除"
+    "（防止数据源漂移、凭据失效）。如需变更连接配置，请由人工处理。"
+)
+
+
+def _protected_config_violation(command: str):
+    if command and _PROTECTED_CONFIG_RE.search(command) and _WRITE_INTENT_RE.search(command):
+        return PROTECTED_CONFIG_MSG
+    return None
+
+
+
 # ---------------------------------------------------------------- 状态管理
 
 def _load_state() -> dict:
@@ -383,6 +409,9 @@ def run_powershell_script(
     ],
 ) -> str:
     """向已激活的 PowerShell 窗口发送命令（GUI 自动化，命令显示在真实窗口中）"""
+    deny = _protected_config_violation(script)
+    if deny:
+        return deny
     try:
         procs = get_powershell_processes()
         if not procs:
@@ -514,6 +543,9 @@ def execute_powershell_command(
     ],
 ) -> str:
     """后台直接执行，不依赖窗口（推荐用于所有"拿结果"的场景）"""
+    deny = _protected_config_violation(command)
+    if deny:
+        return deny
     try:
         stdout, stderr, returncode = run_powershell_command(command, timeout=180)
         if returncode != 0:
