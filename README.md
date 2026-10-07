@@ -2,16 +2,27 @@
 
 > 技术栈：Python 3.12 · LangGraph Supervisor · MCP stdio · Selenium/CDP · MySQL · SSH
 
+> **项目出处**：本项目基于慕课网《AI Agent+MCP 从 0 到 1 打造个人专属编程智能体》（讲师 Sam，https://coding.imooc.com/class/938.html）二次开发。课程基座之外的独立增量见下文「二次开发增量」一节。
+
 ## 一、项目简介
 
 **一句话：用自然语言驱动一个"会拆活、会执行、会汇报"的多智能体系统——把"查网页、操作文件、跑终端、查数据库、管 Linux 沙盒"等 39 个工具的自动化任务，交给 Supervisor 统一调度、三位专家分工完成。**
 
 解决的核心问题：单个 Agent 挂载全部工具时，频繁选错工具、长任务陷入死循环、不调工具就"假成功"。本项目通过 **职责拆分（3 专家）+ 结构闸（非 prompt 约束）+ 会话持久化（FileSaver）** 系统性地解决这三类问题。
 
-- **39 个 MCP 工具**：全部以 stdio 子进程方式接入，工具与主进程隔离
+- **39 个 MCP 工具**：在课程工具框架上实现并扩充（课程基座 20+），全部以 stdio 子进程方式接入，工具与主进程隔离
 - **Supervisor-Worker 架构**：语义路由、多轮接力、`last_message` 干净回传
 - **可靠性内建**：三层结构闸、空转守卫、失败回滚、上下文三层治理——详见 [架构](#二系统架构)
-- **会话持久化**：自研 FileSaver 按命名空间隔离 checkpoint，重启后按 `thread_id` 恢复多轮对话
+- **会话持久化**：复现课程 FileSaver 并完善，按命名空间隔离 checkpoint，重启后按 `thread_id` 恢复多轮对话
+
+### 二次开发增量（课程之外）
+
+课程交付的是 macOS + Lima 沙盒 + 单编程智能体的教学版本。本项目在此基础上独立完成：
+
+- **架构演进**：单编程智能体 → research/code/infra 三专家分工，工具由课程的 20+ 扩充至 39 个
+- **Windows 环境适配**：Lima 沙盒 → VirtualBox+Ubuntu（paramiko SSH）；Chrome → Edge；终端在课程 pyautogui 方案之外补充 WMI `Win32_Process.Create` 后台进程方案
+- **可靠性工程（核心增量）**：三层结构闸、空转守卫、失败轮次回滚、心跳机制、上下文三层治理、`recursion_limit=560` 推导——均为课程未涉及的独立设计
+- **真实环境排障**：MySQL 9.x 认证插件移除（降级 8.0）、SSH 隧道端口映射、MCP stdio 管道污染等，沉淀 40 项排查台账
 
 ## 二、系统架构
 
@@ -114,6 +125,10 @@ python main.py --thread-id 10     # 指定会话 ID，同 ID 可恢复历史对�
 
 运行中：输入 `new` 开启新会话（旧记录可按原 thread-id 恢复），`exit` 退出。
 
+### 场景回归
+
+30+ 个自设场景的手工回归清单见 `docs/scenarios-regression.md`，覆盖单工具任务 / 跨专家接力 / 多轮记忆 / 三层结构闸触发 / 异常注入五类，结果按真实执行逐条回填。
+
 ## 四、效果展示
 
 **1）命令行执行与结构化汇报**——自然语言任务 → 系统调度 → `【状态】/【已完成】/【问题】/【建议】` 四段汇报：
@@ -159,7 +174,7 @@ AI_Agent/
 │   └── mac_vm.py               macOS 沙盒（未启用）
 │
 ├── tools/                      MCP 客户端 loader（拉起子进程，完整继承 `os.environ`）
-│   ├── file_saver.py           ⭐ 自研 FileSaver（命名空间隔离 checkpoint）
+│   ├── file_saver.py           ⭐ FileSaver（复现课程并完善，命名空间隔离 checkpoint）
 │   ├── file_tools.py           本地文件管理工具
 │   └── *_tools.py              各类 MCP 子进程加载器
 │
@@ -181,8 +196,8 @@ AI_Agent/
 4. **生产级 Checkpointer** — 现状：FileSaver 的 `put_writes` 为空实现，不支持 pending writes 恢复。规划：多用户/生产场景切换 SqliteSaver（单机）或 RedisSaver（分布式），FileSaver 保留为开发调试态。
 5. **浏览器驱动惰性初始化** — 现状：`EdgeChromiumDriverManager` 在 import 阶段联网，断网拖垮子进程（当前靠 `.wdm` 缓存）。规划：首次调用时解析 + `EDGE_DRIVER_PATH` 环境变量指定本地驱动。
 6. **工具层截断全量化** — 现状：上下文三层治理的第一道（统一截断装饰器）只覆盖部分工具。规划：装饰器落地全部 MCP 工具，与 prompt 层"禁止递归读大目录"形成双保险。
-7. **MCP 日志规范化** — 现状：部分服务端仍有直接 `print`。规划：全局改 `logging` 输出 stderr，入口处 `sys.stdout = sys.stderr` 兜底，杜绝协议污染。
-8. **沙盒安全与连接健壮性** — 现状：越界校验未解析符号链接（symlink 逃逸）；SSH 断线为被动检测。规划：`realpath` 解析后再校验 + SSH 心跳探活与自动重连增强。
+7. **MCP 日志规范化** — 现状：部分服务端仍有直接 `print`。规划：调试输出统一 `file=sys.stderr` 或改 `logging`（Handler 指向 stderr）。注意**不能**用 `sys.stdout = sys.stderr` 重绑兜底——mcp SDK 的 stdio 传输在 `run()` 时才取 `sys.stdout.buffer` 作为协议写通道，提前重绑会把协议帧一并劫持到 stderr，客户端收不到任何消息，服务直接失联。
+8. **沙盒安全与连接健壮性** — 现状：越界校验未解析符号链接（symlink 逃逸）；SSH 断线为被动检测（模块级持久连接在工具调用时检测 `transport.is_active()` 失效后重建，无主动心跳探活）。规划：`realpath` 解析后再校验 + SSH 心跳探活与自动重连增强。
 
 ## 七、TROUBLESHOOTING（排查台账）
 
