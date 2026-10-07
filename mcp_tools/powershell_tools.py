@@ -94,7 +94,8 @@ def _ensure_npm_noninteractive(command: str) -> str:
     return command
 
 
-def run_powershell_command(command: str, capture_output: bool = True, timeout: int = 90):
+def run_powershell_command(command: str, capture_output: bool = True, timeout: int = 90,
+                           show_result: bool = True):
     """执行 PowerShell 命令，返回 (stdout, stderr, returncode)
 
     ⭐ 不用 shell=True：list 模式直接传参更安全，避免命令注入；
@@ -103,6 +104,7 @@ def run_powershell_command(command: str, capture_output: bool = True, timeout: i
     ⭐ stdin 必须 DEVNULL：MCP stdio 的 stdin 是 JSON-RPC 管道。子进程若继承
        stdin，npm create / npx 会把管道当成交互输入一直等 'y'，Agent 表现为卡死。
     ⭐ 执行完弹出可见窗口显示命令和结果，方便用户观察交互效果。
+    :param show_result: False 时不弹窗（弹窗内部调用 WMI 时必须为 False，防递归）
     """
     try:
         command = _ensure_npm_noninteractive(command)
@@ -149,7 +151,8 @@ def run_powershell_command(command: str, capture_output: bool = True, timeout: i
         rc = proc.returncode
 
         # ⭐ 弹出可见窗口显示命令和结果（方便用户观察交互效果）
-        _show_command_result(command, stdout, stderr, rc)
+        if show_result:
+            _show_command_result(command, stdout, stderr, rc)
 
         return stdout, stderr, rc
     except Exception as e:
@@ -157,30 +160,48 @@ def run_powershell_command(command: str, capture_output: bool = True, timeout: i
 
 
 def _show_command_result(command: str, stdout: str, stderr: str, rc: int) -> None:
-    """弹出一个 cmd 窗口显示执行的命令和结果，窗口停留直到用户按键关闭。"""
+    """弹出一个 cmd 窗口显示执行的命令和结果，窗口停留直到用户按键关闭。
+
+    ⭐ 必须走 WMI Win32_Process.Create，不能用 Popen + CREATE_NEW_CONSOLE：
+       本函数运行在 MCP stdio server 内，server 的 stdin/stdout/stderr 都是
+       JSON-RPC 管道。Popen 弹出的 cmd 即使把三个句柄改成 DEVNULL，新控制台
+       仍与 server 控制台/管道生命周期绑定；当管道被 client 关闭（任务结束、
+       Job Object 回收、进程被强杀）时，CreateProcess 直接报
+       0x800700e8（ERROR_NO_DATA，232），窗口打不开还弹系统错误框。
+       WMI 创建的进程父进程是 WmiPrvSE.exe，不继承 server 的任何句柄，
+       不在 client 的 Job Object 进程树内，窗口稳定存活（与 open_powershell
+       同一方案）。
+    """
     try:
-        # 把命令和结果写到临时批处理，由 cmd /k 执行并保持窗口
         result_text = f"命令: {command}\n\n退出码: {rc}\n"
         if stdout:
             result_text += f"\n--- 输出 ---\n{stdout}\n"
         if stderr:
             result_text += f"\n--- 错误 ---\n{stderr}\n"
-        # 转义双引号和特殊字符，写入临时 .txt 供 type 显示
         import tempfile
         tmp = Path(tempfile.gettempdir()) / f"ps_result_{int(time.time()*1000)}.txt"
         tmp.write_text(result_text, encoding="utf-8")
-        # 用 cmd /c type 文件 && pause 弹出窗口显示，pause 保证窗口不自动关闭
-        # ⭐ stdin/stdout/stderr 全部 DEVNULL：弹窗不能继承 MCP 的 stdio 管道，
-        #    否则会报 0x800700e8（管道被关闭）导致窗口打不开
-        subprocess.Popen(
-            ["cmd", "/c", f'type "{tmp}" & echo. & pause'],
-            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+
+        # chcp 65001：结果文件是 UTF-8（含中文），切代码页后 type 才不乱码。
+        # PS 双引号串里用 `" 转义内层双引号；WMI Create 的 ReturnValue 0 才是成功。
+        file_safe = str(tmp).replace("'", "''")
+        wmi_script = (
+            "$startup = ([wmiclass]'Win32_ProcessStartup').CreateInstance(); "
+            "$startup.ShowWindow = 1; "
+            f"$cmd = \"cmd.exe /c chcp 65001>nul & type `\"{file_safe}`\" & echo. & pause\"; "
+            "$r = ([wmiclass]'Win32_Process').Create($cmd, 'C:\\Windows', $startup); "
+            "Write-Output $r.ReturnValue"
         )
-    except Exception:
-        pass  # 弹窗失败不影响主流程
+        # show_result=False：防止 WMI 调用再次触发弹窗、无限递归
+        out, err, rc2 = run_powershell_command(wmi_script, show_result=False)
+        code = out.strip()
+        if rc2 != 0 or code != "0":
+            print(
+                f"结果窗口启动失败（WMI ReturnValue={code or '?'}, {err.strip()[:80]}）",
+                file=sys.stderr, flush=True,
+            )
+    except Exception as e:
+        print(f"结果窗口启动异常：{type(e).__name__}: {e}", file=sys.stderr, flush=True)
 
 
 def get_powershell_processes():
