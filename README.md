@@ -10,7 +10,7 @@
 
 解决的核心问题：单个 Agent 挂载全部工具时，频繁选错工具、长任务陷入死循环、不调工具就"假成功"。本项目通过 **职责拆分（3 专家）+ 结构闸（非 prompt 约束）+ 会话持久化（FileSaver）** 系统性地解决这三类问题。
 
-- **39 个 MCP 工具**：在课程工具框架上实现并扩充（课程基座 20+），全部以 stdio 子进程方式接入，工具与主进程隔离
+- **39 个可用工具**：在课程工具框架上实现并扩充（课程基座 20+），其中 29 个以 MCP stdio 子进程方式接入（工具与主进程隔离），另 10 个为本地文件工具（file 7 + project 3，不经 MCP）
 - **Supervisor-Worker 架构**：语义路由、多轮接力、`last_message` 干净回传
 - **可靠性内建**：三层结构闸、空转守卫、失败回滚、上下文三层治理——详见 [架构](#二系统架构)
 - **会话持久化**：复现课程 FileSaver 并完善，按命名空间隔离 checkpoint，重启后按 `thread_id` 恢复多轮对话
@@ -53,7 +53,7 @@ graph TD
 
 ### 专家与工具
 
-> 全项目共 **40 个 `@mcp.tool`**（mcp_tools 36 + rag 4），三专家启用 **39 个**，其余为 macOS 终端/沙盒（跨平台预留，未启用）。
+> 全项目共 **40 个 `@mcp.tool` 定义**（mcp_tools 36 + rag/rag.py 1 + tools/rag_self_tools 3），其中 **29 个以 MCP 启用**（powershell 7 + browser 3 + self_rag 3 + win_vm 7 + mysql 9），其余 11 个为 macOS/跨平台预留未启用（terminal 5 + mac_vm 4 + shell 1 + rag.py 1）；另有 **10 个本地文件工具不经 MCP**（file 7 + project 3）。三专家合计可用 **39 个**（research 6 + code 17 + infra 16）。
 
 | 专家 | 职责 | 工具数 | 工具清单 |
 |---|---|---|---|

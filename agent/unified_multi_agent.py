@@ -188,7 +188,7 @@ def _print_final_summary(report: dict, steps: int, elapsed: float) -> None:
 
 # ==================== 上下文管理（防止死循环撑爆 LLM 上下文） ====================
 # qwen3 兼容模式报错上限：openai.BadRequestError: Range of input length should be [1, 983616]
-# 死循环时多轮 handoff pair + 工具结果累积会触顶；这里给 supervisor / 专家各保留 80k
+# 死循环时多轮 handoff pair + 工具结果累积会触顶；这里给 supervisor / 专家各保留 40k
 # token 的输入预算，远低于上限又足够保留最近若干轮对话。
 MAX_CONTEXT_TOKENS = 40000
 
@@ -205,7 +205,7 @@ MAX_TOOL_MSG_CHARS = 20000
 #   L2 派遣闸：硬预算按派遣重置，若主管反复派遣同一专家，总调用量实际无上界
 #              （实测正是 50 步递归烧穿的路径）——同专家同轮限派 3 次。
 #   L3 总数闸：单次派遣兜底上限。原 15 次把真实长任务也掐死（专家"显得没用"的
-#              主因），放宽到 25 次后由 L1/L2 负责精确止损。
+#              主因），放宽到 20 次后由 L1/L2 负责精确止损。
 MAX_DUPLICATE_TOOL_CALLS = 3            # L1a：一次派遣内同(工具,参数)最大允许出现次数
 MAX_CONSECUTIVE_TOOL_ERRORS = 3         # L1b：连续失败工具结果数上限
 MAX_DISPATCHES_PER_EXPERT_PER_ROUND = 3  # L2：同一专家单轮最多被成功派遣次数
